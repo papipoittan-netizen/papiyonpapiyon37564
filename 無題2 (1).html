@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>モンスト風ミニゲーム</title>
+  <style>
+    body { background:#111; color:#fff; text-align:center; font-family:sans-serif; }
+    canvas { background:#222; border:2px solid #fff; touch-action:none; display:block; margin:0 auto; }
+    #retryBtn { display:none; margin-top:10px; padding:10px 20px; font-size:16px; cursor:pointer; }
+  </style>
+</head>
+<body>
+<h1>モンスト風 ミニゲーム</h1>
+<p>引っ張って離してショット / 敵反射あり / 味方に触れると派手な友情コンボ / ストライクショットあり</p>
+<canvas id="game" width="360" height="520"></canvas>
+<button id="retryBtn">リトライ</button>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const FRICTION = 0.985;
+const SPEED = 0.18;
+const DIRECT_DAMAGE_BASE = 48;
+const HOMING_DAMAGE_BASE = 5;
+const HOMING_DAMAGE = HOMING_DAMAGE_BASE * 1.2;
+const HOMING_RANGE = 400;
+const TIME_LIMIT = 40;
+let timeLeft = TIME_LIMIT;
+let lastTime = performance.now();
+let gameOver = false;
+let gameClear = false;
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function hitSound(){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.frequency.value = 600;
+  g.gain.value = 0.05;
+  o.connect(g).connect(audioCtx.destination);
+  o.start();
+  o.stop(audioCtx.currentTime + 0.05);
+}
+
+let effects = [];
+function addHitEffect(x, y){
+  effects.push({x,y,life:20,r:8, color:`hsl(${Math.random()*360},100%,50%)`});
+}
+
+const ball = { x:180, y:420, r:12, vx:0, vy:0, moving:false };
+let dragging = false;
+let dragPos = null;
+
+let enemies = [
+  {x:60,y:120,r:16,hp:240,maxHp:320},
+  {x:160,y:120,r:16,hp:240,maxHp:320},
+  {x:260,y:120,r:16,hp:240,maxHp:320},
+  {x:110,y:200,r:18,hp:300,maxHp:400},
+  {x:210,y:200,r:18,hp:300,maxHp:400}
+];
+
+function randomFriends(count){
+  const positions = [];
+  while(positions.length < count){
+    const x = 40 + Math.random() * (canvas.width - 80);
+    const y = 300 + Math.random() * (canvas.height/2 - 40);
+    let overlap = positions.some(p=>Math.hypot(p.x-x,p.y-y)<38);
+    if(!overlap) positions.push({x, y, r:19, used:false});
+  }
+  return positions;
+}
+const friends = randomFriends(3);
+
+let bullets = [];
+let boss = null;
+function spawnBoss(){
+  boss = { x:180,y:160,r:45,hp:1200,maxHp:1200, weak:{x:220,y:160,r:16} };
+}
+
+let ssGauge = 0;
+let ssActive = false;
+let ssTimer = 0;
+const SS_DURATION = 900;
+
+function updateTime(now){
+  const dt = (now - lastTime)/1000;
+  lastTime = now;
+  if(!gameOver && !gameClear){
+    timeLeft -= dt;
+    if(timeLeft <= 0) gameOver = true;
+  }
+}
+
+function reflectBall(nx, ny){
+  const len = Math.hypot(nx, ny) || 1;
+  const ux = nx / len;
+  const uy = ny / len;
+  const dot = ball.vx * ux + ball.vy * uy;
+  ball.vx -= 2 * dot * ux;
+  ball.vy -= 2 * dot * uy;
+}
+
+function update(){
+  if(gameOver || gameClear) return;
+
+  let DIRECT_DAMAGE = DIRECT_DAMAGE_BASE;
+  if(ssActive){ DIRECT_DAMAGE *= 2; }
+
+  if(ball.moving){
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vx *= FRICTION;
+    ball.vy *= FRICTION;
+    if(Math.abs(ball.vx)+Math.abs(ball.vy) < 0.2){
+      ball.vx = ball.vy = 0;
+      ball.moving = false;
+      friends.forEach(f=>f.used=false);
+    }
+  }
+
+  if(ball.x < ball.r){ ball.x = ball.r; ball.vx *= -1; }
+  if(ball.x > canvas.width-ball.r){ ball.x = canvas.width-ball.r; ball.vx *= -1; }
+  if(ball.y < ball.r){ ball.y = ball.r; ball.vy *= -1; }
+  if(ball.y > canvas.height-ball.r){ ball.y = canvas.height-ball.r; ball.vy *= -1; }
+
+  enemies.forEach(e=>{
+    if(e.hp<=0) return;
+    if(Math.hypot(ball.x-e.x, ball.y-e.y) < ball.r+e.r){
+      e.hp -= DIRECT_DAMAGE;
+      reflectBall(ball.x-e.x, ball.y-e.y);
+      hitSound();
+      addHitEffect(e.x,e.y);
+      ssGauge = Math.min(100, ssGauge + 15);
+    }
+  });
+
+  if(enemies.every(e=>e.hp<=0) && !boss) spawnBoss();
+
+  if(boss && boss.hp>0){
+    if(Math.hypot(ball.x-boss.x,ball.y-boss.y) < ball.r+boss.r){
+      boss.hp -= DIRECT_DAMAGE*2;
+      reflectBall(ball.x-boss.x, ball.y-boss.y);
+      hitSound();
+      addHitEffect(boss.x,boss.y);
+      ssGauge = Math.min(100, ssGauge + 15);
+    }
+    if(Math.hypot(ball.x-boss.weak.x,ball.y-boss.weak.y) < ball.r+boss.weak.r){
+      boss.hp -= DIRECT_DAMAGE*2;
+      hitSound();
+      addHitEffect(boss.weak.x,boss.weak.y);
+      ssGauge = Math.min(100, ssGauge + 21);
+    }
+    if(boss.hp <= 0) { boss.hp = 0; gameClear = true; }
+  }
+
+  friends.forEach(f=>{
+    if(!f.used && Math.hypot(ball.x-f.x, ball.y-f.y) < ball.r+f.r){
+      f.used = true;
+      const targets=[...enemies.filter(e=>e.hp>0), ...(boss&&boss.hp>0?[boss]:[])];
+      targets.forEach(t=> {
+        bullets.push({x:f.x,y:f.y,target:t,life:HOMING_RANGE/4});
+        bullets.push({x:f.x,y:f.y,target:t,life:HOMING_RANGE/2});
+        bullets.push({x:f.x,y:f.y,target:t,life:HOMING_RANGE/3, dx:2, dy:-2});
+        for(let i=0;i<6;i++) addHitEffect(f.x+Math.random()*20-10,f.y+Math.random()*20-10);
+      });
+    }
+  });
+
+  bullets = bullets.filter(b=>b.life-- > 0);
+  bullets.forEach(b=>{
+    if(!b.target || b.target.hp<=0) return;
+    const dx = (b.dx !== undefined) ? b.dx : b.target.x-b.x;
+    const dy = (b.dy !== undefined) ? b.dy : b.target.y-b.y;
+    const d=Math.hypot(dx,dy)||1;
+    b.x += (dx/d)*4;
+    b.y += (dy/d)*4;
+    if(d<b.target.r){
+      b.target.hp -= HOMING_DAMAGE;
+      hitSound();
+      addHitEffect(b.target.x,b.target.y);
+      b.life = 0;
+    }
+  });
+
+  if(ssActive){
+    ssTimer++;
+    // SS中は自キャラ周りにエフェクト追加
+    for(let i=0;i<3;i++){
+      effects.push({
+        x: ball.x + Math.random()*24-12,
+        y: ball.y + Math.random()*24-12,
+        r: Math.random()*6+4,
+        color: `hsl(${Math.random()*360},100%,50%)`,
+        life: 20
+      });
+    }
+    if(ssTimer > SS_DURATION){ ssActive = false; ssTimer = 0; }
+  }
+
+  effects = effects.filter(e=>e.life-- > 0);
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if(ssActive){
+    ctx.fillStyle = 'rgba(255,255,0,0.1)';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+
+  enemies.forEach(e=>{
+    if(e.hp<=0) return;
+    ctx.fillStyle="brown";
+    ctx.beginPath();
+    ctx.arc(e.x,e.y,e.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle="#fff";
+    ctx.fillText(Math.ceil(e.hp), e.x-8, e.y+4);
+  });
+
+  if(boss && boss.hp>0){ 
+    ctx.fillStyle="purple"; 
+    ctx.beginPath();ctx.arc(boss.x,boss.y,boss.r,0,Math.PI*2);ctx.fill(); 
+    ctx.fillStyle="yellow"; 
+    ctx.beginPath();ctx.arc(boss.weak.x,boss.weak.y,boss.weak.r,0,Math.PI*2);ctx.fill(); 
+    ctx.fillStyle="#fff"; 
+    ctx.fillText(Math.ceil(boss.hp), boss.x-10, boss.y+4); 
+  }
+
+  friends.forEach(f=>{ ctx.fillStyle="cyan"; ctx.beginPath();ctx.arc(f.x,f.y,f.r,0,Math.PI*2);ctx.fill(); });
+  bullets.forEach(b=>{ ctx.fillStyle="white"; ctx.fillRect(b.x-2,b.y-2,4,4); });
+  effects.forEach(e=>{ ctx.fillStyle=e.color; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill(); });
+
+  ctx.fillStyle = "orange";
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
+  ctx.fill();
+
+  if(dragging && dragPos){ ctx.strokeStyle="#0f0"; ctx.beginPath(); ctx.moveTo(ball.x,ball.y); ctx.lineTo(dragPos.x,dragPos.y); ctx.stroke(); }
+  ctx.fillStyle="#fff";
+  ctx.fillText(`TIME: ${Math.ceil(timeLeft)}`, 10, 20);
+  ctx.fillText(`SS: ${ssGauge}%`, 10, 40);
+  if(gameOver) ctx.fillText("GAME OVER", 130, 260);
+  if(gameClear){ ctx.font="48px sans-serif"; ctx.fillText("CLEAR!!", 90, 260); ctx.font="16px sans-serif"; }
+
+  if(gameOver || gameClear){
+    retryBtn.style.display = "inline-block";
+  }
+}
+
+function loop(now){ updateTime(now); update(); draw(); requestAnimationFrame(loop); }
+
+canvas.addEventListener("pointerdown",e=>{
+  if(ball.moving || gameOver || gameClear) return;
+  if(ssGauge >= 100){ ssActive = true; ssGauge = 0; ssTimer = 0; hitSound(); return; }
+  dragging = true;
+  dragPos = {x:e.offsetX, y:e.offsetY};
+});
+canvas.addEventListener("pointermove",e=>{ if(dragging){ dragPos = {x:e.offsetX, y:e.offsetY}; } });
+canvas.addEventListener("pointerup",e=>{
+  if(!dragging) return; 
+  ball.vx = (ball.x - e.offsetX) * SPEED; 
+  ball.vy = (ball.y - e.offsetY) * SPEED; 
+  ball.moving = true; 
+  dragging = false; 
+  dragPos = null; 
+});
+
+const retryBtn = document.getElementById("retryBtn");
+retryBtn.addEventListener("click", resetGame);
+
+function resetGame(){
+    ball.x = 180; ball.y = 420; ball.vx = 0; ball.vy = 0; ball.moving = false;
+    dragging = false; dragPos = null;
+    enemies = [
+        {x:60,y:120,r:16,hp:240,maxHp:320},
+        {x:160,y:120,r:16,hp:240,maxHp:320},
+        {x:260,y:120,r:16,hp:240,maxHp:320},
+        {x:110,y:200,r:18,hp:300,maxHp:400},
+        {x:210,y:200,r:18,hp:300,maxHp:400}
+    ];
+    friends.splice(0,friends.length,...randomFriends(3));
+    boss = null;
+    bullets = [];
+    effects = [];
+    timeLeft = TIME_LIMIT;
+    gameOver = false;
+    gameClear = false;
+    ssGauge = 0;
+    ssActive = false;
+    ssTimer = 0;
+    retryBtn.style.display = "none";
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
